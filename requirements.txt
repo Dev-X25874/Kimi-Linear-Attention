@@ -1,0 +1,28 @@
+# Core dependencies
+torch>=2.1.0
+transformers>=4.36.0
+numpy>=1.24.0
+einops>=0.7.0
+
+# Training
+accelerate>=0.25.0
+deepspeed>=0.12.0
+wandb>=0.16.0
+
+# Evaluation
+datasets>=2.15.0
+evaluate>=0.4.0
+
+# Utilities
+pyyaml>=6.0
+tqdm>=4.66.0
+safetensors>=0.4.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Code quality
+black>=23.12.0
+isort>=5.13.0
+flake8>=7.0.0

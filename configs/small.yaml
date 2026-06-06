@@ -1,0 +1,12 @@
+vocab_size: 10000
+hidden_size: 512
+num_layers: 12
+num_kda_layers: 9
+num_mla_layers: 3
+num_heads: 8
+intermediate_size: 2048
+kda_chunk_size: 64
+kda_feature_dim: 64
+mla_kv_lora_rank: 128
+mla_q_lora_rank: 384
+max_position_embeddings: 4096
