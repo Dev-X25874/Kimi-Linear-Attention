@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from kimi_linear import KimiLinearConfig, KimiLinearModel
 import argparse
+import yaml
 from tqdm import tqdm
 import os
 
@@ -36,13 +37,9 @@ def train():
     args = parser.parse_args()
     
     # Load config
-    config = KimiLinearConfig(
-        vocab_size=10000,
-        hidden_size=512,
-        num_layers=12,
-        num_kda_layers=9,
-        num_mla_layers=3,
-    )
+    with open(args.config, "r") as f:
+        config_dict = yaml.safe_load(f)
+    config = KimiLinearConfig(**config_dict)
     
     # Create model
     model = KimiLinearModel(config)
