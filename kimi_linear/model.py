@@ -94,13 +94,20 @@ class KimiLinearBlock(nn.Module):
         """
         # Attention with residual
         residual = hidden_states
-        attn_output, new_cache = self.attention(
-            hidden_states,
-            attention_mask=attention_mask,
-            use_cache=use_cache,
-            past_state=past_key_value if self.is_kda else None,
-            past_key_value=past_key_value if not self.is_kda else None,
-        )
+        if self.is_kda:
+            attn_output, new_cache = self.attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                past_state=past_key_value,
+            )
+        else:
+            attn_output, new_cache = self.attention(
+                hidden_states,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+                past_key_value=past_key_value,
+            )
         hidden_states = residual + attn_output
         
         # MLP with residual
@@ -172,6 +179,13 @@ class KimiLinearModel(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
+        
+        # The generic init above zeros every Linear bias and randomizes every
+        # Linear weight, which would clobber the KDA gate biases that encode
+        # decay_init/beta_init. Re-apply that gate-specific init afterwards.
+        for module in self.modules():
+            if isinstance(module, KimiDeltaAttention):
+                module._reset_gate_parameters()
     
     def _init_weights(self, module):
         """Initialize weights."""
