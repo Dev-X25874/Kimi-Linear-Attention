@@ -70,6 +70,8 @@ class KimiDeltaAttention(nn.Module):
         self.feature_dim = feature_dim
         self.chunk_size = chunk_size
         self.use_gating = use_gating
+        self.decay_init = decay_init
+        self.beta_init = beta_init
         self.eps = eps
         
         # Q, K, V projections
@@ -83,29 +85,48 @@ class KimiDeltaAttention(nn.Module):
         # Gating MLPs (for α and β)
         if use_gating:
             # Decay gate (α): controls forgetting
+            # Last layer needs bias=True so the gate can actually start at
+            # decay_init - with bias=False, zeroing the weight just collapses
+            # the output to 0.0 regardless of decay_init (sigmoid(0) = 0.5).
             self.alpha_mlp = nn.Sequential(
                 nn.Linear(hidden_size, hidden_size // 4, bias=False),
                 nn.SiLU(),
-                nn.Linear(hidden_size // 4, num_heads * feature_dim, bias=False),
+                nn.Linear(hidden_size // 4, num_heads * feature_dim, bias=True),
             )
             
             # Update gate (β): controls update strength
             self.beta_mlp = nn.Sequential(
                 nn.Linear(hidden_size, hidden_size // 4, bias=False),
                 nn.SiLU(),
-                nn.Linear(hidden_size // 4, num_heads * feature_dim, bias=False),
+                nn.Linear(hidden_size // 4, num_heads * feature_dim, bias=True),
             )
             
-            # Initialize to reasonable defaults
-            with torch.no_grad():
-                # Initialize alpha to decay_init
-                self.alpha_mlp[-1].weight.data.fill_(0.0)
-                
-                # Initialize beta to beta_init
-                self.beta_mlp[-1].weight.data.fill_(0.0)
+            self._reset_gate_parameters()
         
         # Layer norm
         self.norm = RMSNorm(hidden_size, eps=eps)
+    
+    def _reset_gate_parameters(self):
+        """(Re-)initialize the gate MLPs so alpha/beta start at decay_init/beta_init.
+
+        Zeroing the last layer's weight makes the gate input-independent at
+        init (sigmoid(bias) for every position), while the bias is set via
+        the inverse sigmoid (logit) of the desired init value. Call this
+        again after any later re-initialization (e.g. a model-wide
+        `apply(_init_weights)`) that would otherwise overwrite this bias.
+        """
+        if not self.use_gating:
+            return
+        with torch.no_grad():
+            self.alpha_mlp[-1].weight.data.zero_()
+            self.alpha_mlp[-1].bias.data.fill_(
+                math.log(self.decay_init / (1.0 - self.decay_init))
+            )
+            
+            self.beta_mlp[-1].weight.data.zero_()
+            self.beta_mlp[-1].bias.data.fill_(
+                math.log(self.beta_init / (1.0 - self.beta_init))
+            )
     
     def forward(
         self,
@@ -152,22 +173,19 @@ class KimiDeltaAttention(nn.Module):
             beta = beta.view(batch_size, seq_len, self.num_heads, self.feature_dim)
             beta = torch.sigmoid(beta)  # (0, 1) range
         else:
-            alpha = torch.ones_like(q) * 0.9
-            beta = torch.ones_like(q) * 0.1
+            alpha = torch.full_like(q, self.decay_init)
+            beta = torch.full_like(q, self.beta_init)
         
         # Apply chunkwise recurrent processing
-        output = self._chunkwise_recurrence(q, k, v, alpha, beta, past_state)
+        output, final_state = self._chunkwise_recurrence(q, k, v, alpha, beta, past_state)
         
         # Reshape and project output
         output = output.reshape(batch_size, seq_len, self.num_heads * self.feature_dim)
         output = self.o_proj(output)
         
-        # Compute final state for caching (if needed)
-        new_state = None
-        if use_cache:
-            # Simple implementation: just store last state
-            # In practice, you'd want to properly maintain the recurrent state
-            new_state = self._compute_final_state(k, v, alpha, beta, past_state)
+        # State for caching: the recurrence above already computed it once,
+        # so just reuse it instead of recomputing from scratch.
+        new_state = final_state if use_cache else None
         
         return output, new_state
     
@@ -179,7 +197,7 @@ class KimiDeltaAttention(nn.Module):
         alpha: torch.Tensor,
         beta: torch.Tensor,
         past_state: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Apply chunkwise recurrent processing.
         
         This implements the core KDA recurrence in a parallel-friendly way:
@@ -193,7 +211,8 @@ class KimiDeltaAttention(nn.Module):
             past_state: Previous state for incremental decoding
             
         Returns:
-            Output tensor (batch, seq_len, num_heads, feature_dim)
+            Tuple of (output tensor (batch, seq_len, num_heads, feature_dim),
+                      final recurrent state (batch, num_heads, feature_dim, feature_dim))
         """
         batch_size, seq_len, num_heads, feature_dim = q.shape
         
@@ -259,38 +278,4 @@ class KimiDeltaAttention(nn.Module):
         # Concatenate all chunks
         output = torch.cat(outputs, dim=1)
         
-        return output
-    
-    def _compute_final_state(
-        self,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        alpha: torch.Tensor,
-        beta: torch.Tensor,
-        past_state: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Compute final recurrent state for caching."""
-        # Simplified: just compute the state after processing all tokens
-        # In practice, this would be computed during the forward pass
-        batch_size, seq_len, num_heads, feature_dim = k.shape
-        
-        if past_state is not None:
-            state = past_state
-        else:
-            state = torch.zeros(
-                batch_size, num_heads, feature_dim, feature_dim,
-                device=k.device, dtype=k.dtype
-            )
-        
-        # Apply recurrence for all tokens
-        for t in range(seq_len):
-            alpha_t = alpha[:, t]
-            beta_t = beta[:, t]
-            k_t = k[:, t]
-            v_t = v[:, t]
-            
-            state = state * alpha_t.unsqueeze(-1)
-            update = (beta_t * k_t).unsqueeze(-1) @ v_t.unsqueeze(-2)
-            state = state + update
-        
-        return state
+        return output, state
